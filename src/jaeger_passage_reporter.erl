@@ -66,10 +66,7 @@
 
 -record(?STATE,
         {
-          socket               :: gen_udp:socket(),
-          thrift_format        :: thrift_protocol:format(),
-          agent_host           :: inet:hostname(),
-          agent_port           :: inet:port_number(),
+          thrift_client        :: jaeger_passage_thrift:client(),
           default_service_name :: atom(),
           process_tags         :: passage:tags()
         }).
@@ -83,13 +80,13 @@
 -type start_options() :: [start_option()].
 %% Options for {@link start/2}.
 
--type start_option() :: {thrift_format, thrift_protocol:format()}
+-type start_option() :: {thrift_format, jaeger_passage_thrift:format()}
                       | {agent_host, inet:hostname()}
                       | {agent_port, inet:port_number()}
                       | {default_service_name, atom()}
                       | {process_tags, passage:tags()}.
 %% <ul>
-%%   <li><b>thrift_format</b>: The format for encoding thrift messages. The default value is `compact'.</li>
+%%   <li><b>thrift_format</b>: The format for encoding thrift messages. The default value is `binary'.</li>
 %%   <li><b>agent_host</b>: The hostname of the jaeger agent. The default value is `"127.0.0.1"'.</li>
 %%   <li><b>agent_port</b>: The port of the jaeger agent. The default values for the thrift format `compact' and `binary' are `6831' and `6832' respectively.</li>
 %%   <li><b>default_service_name</b>: The default service name. If a reporting span has `location.application' tag, the value is used as the service name instead of this. The default value is `ReporterId'.</li>
@@ -164,7 +161,7 @@ report(ReporterId, Span) ->
 %%------------------------------------------------------------------------------
 %% @private
 init({ReporterId, Options}) ->
-    Format = proplists:get_value(thrift_format, Options, compact),
+    Format = proplists:get_value(thrift_format, Options, binary),
     DefaultPort =
         case Format of
             compact -> 6831;
@@ -185,13 +182,10 @@ init({ReporterId, Options}) ->
             ?TRACER_HOSTNAME_TAG_KEY => list_to_binary(Hostname),
             'erlang.node' => node()
            }),
-    {ok, Socket} = gen_udp:open(0),
+    {ok, Client} = jaeger_passage_thrift:start_client(AgentHost, AgentPort, Format),
     State =
         #?STATE{
-            socket        = Socket,
-            thrift_format = Format,
-            agent_host    = AgentHost,
-            agent_port    = AgentPort,
+            thrift_client = Client,
             default_service_name  = DefaultServiceName,
             process_tags  = Tags1
            },
@@ -212,7 +206,8 @@ handle_info(_Info, State) ->
     {noreply, State}.
 
 %% @private
-terminate(_Reason, _State) ->
+terminate(_Reason, State) ->
+    jaeger_passage_thrift:stop_client(State#?STATE.thrift_client),
     ok.
 
 %% @private
@@ -223,9 +218,9 @@ code_change(_OldVsn, State, _Extra) ->
 %% Internal Functions
 %%------------------------------------------------------------------------------
 -spec handle_report(passage_span:span(), #?STATE{}) -> {noreply, #?STATE{}}.
-handle_report(Span, State = #?STATE{default_service_name = DefaultName, process_tags = Tags}) ->
+handle_report(Span, State) ->
+    #?STATE{default_service_name = DefaultName, process_tags = Tags, thrift_client = Client} = State,
     Name = maps:get('location.application', passage_span:get_tags(Span), DefaultName),
-    Message = jaeger_passage_thrift:make_emit_batch_message(Name, Tags, [Span]),
-    Encoded = thrift_protocol:encode_message(Message, State#?STATE.thrift_format),
-    ok = gen_udp:send(State#?STATE.socket, State#?STATE.agent_host, State#?STATE.agent_port, Encoded),
-    {noreply, State}.
+    Client1 = jaeger_passage_thrift:send_report(Name, Tags, Span, Client),
+    NewState = State#?STATE{thrift_client = Client1},
+    {noreply, NewState}.

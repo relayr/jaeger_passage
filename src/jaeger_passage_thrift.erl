@@ -3,106 +3,98 @@
 %% @doc Thrift messages for jaeger
 %%
 %% IDL:
-%% - https://github.com/jaegertracing/jaeger-idl/blob/84a83104/thrift/agent.thrift
-%% - https://github.com/jaegertracing/jaeger-idl/blob/84a83104/thrift/jaeger.thrift
+%% - https://github.com/jaegertracing/jaeger-idl/blob/b59e84eb/thrift/agent.thrift
+%% - https://github.com/jaegertracing/jaeger-idl/blob/b59e84eb/thrift/jaeger.thrift
 %%
 %% @private
 -module(jaeger_passage_thrift).
 
--include_lib("thrift_protocol/include/thrift_protocol.hrl").
+-include("thrift/jaeger_types.hrl").
 -include("constants.hrl").
 
-%%------------------------------------------------------------------------------
-%% Application Internal API
-%%------------------------------------------------------------------------------
--export([make_emit_batch_message/3]).
+-export([start_client/3, send_report/4, stop_client/1]).
 
-%%------------------------------------------------------------------------------
-%% Macros
-%%------------------------------------------------------------------------------
--define(TAG_TYPE_STRING, 0).
--define(TAG_TYPE_DOUBLE, 1).
--define(TAG_TYPE_BOOL, 2).
--define(TAG_TYPE_LONG, 3).
--define(TAG_TYPE_BINARY, 4).
+-type format() :: binary | compact.
+-type client() :: term(). % #tclient{} from thrift_client
 
--define(REF_TYPE_CHILD_OF, 0).
--define(REF_TYPE_FOLLOWS_FROM, 1).
-
--define(STRUCT(F1), #thrift_protocol_struct{fields = #{1 => F1}}).
--define(STRUCT(F1, F2), #thrift_protocol_struct{fields = #{1 => F1, 2 => F2}}).
-
--define(LIST(Es), #thrift_protocol_list{element_type = struct, elements = Es}).
+-export_type([format/0, client/0]).
 
 %%------------------------------------------------------------------------------
 %% Application Internal API
 %%------------------------------------------------------------------------------
--spec make_emit_batch_message(atom(), passage:tags(), [passage_span:span()]) ->
-                                     thrift_protocol:message().
-make_emit_batch_message(ServiceName, ServiceTags, Spans) ->
-    Process = make_process(ServiceName, ServiceTags),
-    Batch = ?STRUCT(Process, make_spans(Spans)),
-    #thrift_protocol_message{
-       method_name  = <<"emitBatch">>,
-       message_type = oneway,
-       sequence_id  = 0,
-       body         = ?STRUCT(Batch)
-      }.
+
+-spec start_client(inet:hostname(), inet:port_number(), format()) -> {ok, client()} | {error, term()}.
+start_client(AgentHost, AgentPort, Format) ->
+    {ok, TransportFactory} = jaeger_passage_thrift_transport:new_transport_factory(AgentHost, AgentPort, #{}),
+    {ok, ProtocolFactory} = case Format of
+                                binary ->
+                                    thrift_binary_protocol:new_protocol_factory(TransportFactory, []);
+                                compact ->
+                                    % TODO implement compact format support (requires thrift library update)
+%%                                    thrift_compact_protocol:new_protocol_factory(TransportFactory, [])
+                                    {error, {unsupported_thrift_format, Format}}
+                            end,
+    case ProtocolFactory() of
+        {ok, Protocol} ->
+            thrift_client:new(Protocol, agent_thrift);
+        {error, _} = Error ->
+            Error
+    end.
+
+-spec send_report(atom(), passage:tags(), passage_span:span(), client()) -> client().
+send_report(Name, Tags, Span, Client) ->
+    Process = #'Process'{serviceName = atom_to_binary(Name, utf8), tags = make_tags(Tags)},
+    Batch = #'Batch'{process = Process, spans = [make_span(Span)]},
+    % TODO: update thrift library and use plain thrift_client:send_call/3
+%%    {Client1, ok} = thrift_client:send_call(Client, emitBatch, [Batch]),
+    {Client1, ok} = send_function_call(Client, emitBatch, [Batch]),
+    Client1.
+
+-spec stop_client(client()) -> ok.
+stop_client(Client) ->
+    thrift_client:close(Client),
+    ok.
 
 %%------------------------------------------------------------------------------
 %% Internal Functions
 %%------------------------------------------------------------------------------
--spec make_process(atom(), passage:tags()) -> thrift_protocol:struct().
-make_process(ServiceName, ServiceTags) ->
-    ?STRUCT(atom_to_binary(ServiceName, utf8), make_tags(ServiceTags)).
 
--spec make_tags(Tags) -> thrift_protocol:thrift_list() when
-      Tags :: #{atom() => term()}.
+-spec make_tags(passage:tags()) -> ['Tag'()].
 make_tags(Tags) ->
-    ?LIST(maps:fold(fun (K, V, Acc) -> [make_tag(K, V) | Acc] end, [], Tags)).
+    [make_tag(K, V) || {K, V} <- maps:to_list(Tags)].
 
--spec make_tag(passage:tag_name(), passage:tag_value()) -> thrift_protocol:struct().
+-spec make_tag(passage:tag_name(), passage:tag_value()) -> 'Tag'().
 make_tag(Key, Value) ->
-    {ValueType, FieldId, TagValue} = make_tag_value(Value),
-    #thrift_protocol_struct{
-       fields = #{
-         1 => atom_to_binary(Key, utf8),
-         2 => {i32, ValueType},
-         FieldId => TagValue
-        }
-      }.
+    Tag = #'Tag'{
+        key = atom_to_binary(Key, utf8),
+        vType = ?JAEGER_TAGTYPE_STRING % set as default
+    },
+    make_tag_value(Tag, Value).
 
--spec make_tag_value(term()) -> {ValueType, FieldId, Value} when
-      ValueType :: non_neg_integer(),
-      FieldId   :: thrift_protocol:field_id(),
-      Value     :: thrift_protocol:data().
-make_tag_value(X) when is_boolean(X) -> {?TAG_TYPE_BOOL,   5, X};
-make_tag_value(X) when is_atom(X)    -> {?TAG_TYPE_STRING, 3, atom_to_binary(X, utf8)};
-make_tag_value(X) when is_binary(X)  -> {?TAG_TYPE_STRING, 3, X};
-make_tag_value(X) when is_float(X)   -> {?TAG_TYPE_DOUBLE, 4, X};
-make_tag_value(X) when is_integer(X) -> {?TAG_TYPE_LONG,   6, {i64, X}};
-make_tag_value(X) ->
+-spec make_tag_value('Tag'(), term()) -> 'Tag'().
+make_tag_value(Tag, X) when is_boolean(X) -> Tag#'Tag'{vType = ?JAEGER_TAGTYPE_BOOL, vBool = X};
+make_tag_value(Tag, X) when is_atom(X)    -> Tag#'Tag'{vType = ?JAEGER_TAGTYPE_STRING, vStr = atom_to_binary(X, utf8)};
+make_tag_value(Tag, X) when is_binary(X)  -> Tag#'Tag'{vType = ?JAEGER_TAGTYPE_STRING, vStr = X};
+make_tag_value(Tag, X) when is_float(X)   -> Tag#'Tag'{vType = ?JAEGER_TAGTYPE_DOUBLE, vDouble = X};
+make_tag_value(Tag, X) when is_integer(X) -> Tag#'Tag'{vType = ?JAEGER_TAGTYPE_LONG, vLong = X};
+make_tag_value(Tag, X) ->
     Size = erlang:external_size(X),
     case Size > 1024 of
         true ->
-            {?TAG_TYPE_STRING, 3,
-             list_to_binary(io_lib:format("...~p bytes... (ommitted by ~p)",
-                                          [Size, ?MODULE]))};
+            Binary = list_to_binary(io_lib:format("...~p bytes... (ommitted by ~p)", [Size, ?MODULE])),
+            Tag#'Tag'{vType = ?JAEGER_TAGTYPE_STRING, vStr = Binary};
         false ->
             try list_to_binary(X) of
-                Binary -> {?TAG_TYPE_STRING, 3, Binary}
+                Binary ->
+                    Tag#'Tag'{vType = ?JAEGER_TAGTYPE_STRING, vStr = Binary}
             catch
                 error:badarg ->
                     Binary = list_to_binary(io_lib:format("~1024p", [X])),
-                    {?TAG_TYPE_STRING, 3, Binary}
+                    Tag#'Tag'{vType = ?JAEGER_TAGTYPE_STRING, vStr = Binary}
             end
     end.
 
--spec make_spans([passage_span:span()]) -> thrift_protocol:thrift_list().
-make_spans(Spans) ->
-    ?LIST(lists:map(fun make_span/1, Spans)).
-
--spec make_span(passage_span:span()) -> thrift_protocol:struct().
+-spec make_span(passage_span:span()) -> 'Span'().
 make_span(Span) ->
     Context = passage_span:get_context(Span),
     TraceId = jaeger_passage_span_context:get_trace_id(Context),
@@ -125,62 +117,52 @@ make_span(Span) ->
             error         -> Tags0;
             {ok, DebugId} -> maps:put(?JAEGER_DEBUG_HEADER, DebugId, Tags0)
         end,
-    #thrift_protocol_struct{
-       fields = #{
-         1 => {i64, to_i64(TraceId)},
-         2 => {i64, to_i64(TraceId bsr 64)},
-         3 => {i64, to_i64(jaeger_passage_span_context:get_span_id(Context))},
-         4 => {i64, to_i64(ParentSpanId)},
-         5 => atom_to_binary(passage_span:get_operation_name(Span), utf8),
-         6 => make_references(Refs),
-         7 => {i32, jaeger_passage_span_context:get_flags(Context)},
-         8 => {i64, timestamp_to_us(passage_span:get_start_time(Span))},
-         9 => {i64, get_duration_us(Span)},
-         10 => make_tags(Tags1),
-         11 => make_logs(passage_span:get_logs(Span))
-        }
-      }.
+    #'Span'{
+        traceIdLow = to_i64(TraceId),
+        traceIdHigh = to_i64(TraceId bsr 64),
+        spanId = to_i64(jaeger_passage_span_context:get_span_id(Context)),
+        parentSpanId = to_i64(ParentSpanId),
+        operationName = atom_to_binary(passage_span:get_operation_name(Span), utf8),
+        references = make_references(Refs),
+        flags = jaeger_passage_span_context:get_flags(Context),
+        startTime = timestamp_to_us(passage_span:get_start_time(Span)),
+        duration = get_duration_us(Span),
+        tags = make_tags(Tags1),
+        logs = lists:map(fun make_log/1, passage_span:get_logs(Span))
+    }.
 
--spec make_references(passage:refs()) -> thrift_protocol:thrift_list().
+-spec make_references(passage:refs()) -> ['SpanRef'()].
 make_references(Refs) ->
-    Elements =
-        lists:filtermap(
-          fun (Ref = {_, Span}) ->
-                  Context = passage_span:get_context(Span),
-                  case jaeger_passage_span_context:get_span_id(Context) of
-                      0 -> false;
-                      _ -> {true, make_reference(Ref)}
-                  end
-          end,
-          Refs),
-    ?LIST(Elements).
+    lists:filtermap(
+        fun(Ref = {_, Span}) ->
+            Context = passage_span:get_context(Span),
+            case jaeger_passage_span_context:get_span_id(Context) of
+                0 -> false;
+                _ -> {true, make_reference(Ref)}
+            end
+        end,
+        Refs).
 
--spec make_reference(passage:ref()) -> thrift_protocol:struct().
-make_reference(Ref) ->
+-spec make_reference(passage:ref()) -> 'SpanRef'().
+make_reference({_, Span} = Ref) ->
     RefType =
         case Ref of
-            {child_of, Span}     -> ?REF_TYPE_CHILD_OF;
-            {follows_from, Span} -> ?REF_TYPE_FOLLOWS_FROM
+            {child_of, _}     -> ?JAEGER_SPANREFTYPE_CHILD_OF;
+            {follows_from, _} -> ?JAEGER_SPANREFTYPE_FOLLOWS_FROM
         end,
     Context = passage_span:get_context(Span),
     TraceId = jaeger_passage_span_context:get_trace_id(Context),
     SpanId = jaeger_passage_span_context:get_span_id(Context),
-    #thrift_protocol_struct{
-       fields = #{
-         1 => {i32, RefType},
-         2 => {i64, to_i64(TraceId)},
-         3 => {i64, to_i64(TraceId bsr 64)},
-         4 => {i64, to_i64(SpanId)}
-        }
-      }.
+    #'SpanRef'{
+        refType = RefType,
+        traceIdLow = to_i64(TraceId),
+        traceIdHigh = to_i64(TraceId bsr 64),
+        spanId = to_i64(SpanId)
+    }.
 
--spec make_logs([passage_span:log()]) -> thrift_protocol:thrift_list().
-make_logs(Logs) ->
-    ?LIST(lists:map(fun make_log/1, Logs)).
-
--spec make_log(passage_span:log()) -> thrift_protocol:struct().
+-spec make_log(passage_span:log()) -> 'Log'().
 make_log({Fields, Time}) ->
-    ?STRUCT({i64, timestamp_to_us(Time)}, make_tags(Fields)).
+    #'Log'{timestamp = timestamp_to_us(Time), fields = make_tags(Fields)}.
 
 -spec timestamp_to_us(erlang:timestamp()) -> non_neg_integer().
 timestamp_to_us(Timestamp) ->
@@ -196,3 +178,39 @@ get_duration_us(Span) ->
 to_i64(N) ->
     <<S:64/signed>> = <<N:64>>,
     S.
+
+
+%%-------------------------------------------------------------------------------------------------------------
+%% This function has been copied to override a bug in thrift library (it is already fixed on master)
+%%-------------------------------------------------------------------------------------------------------------
+
+-record(tclient, {service :: module(), protocol :: term(), seqid :: non_neg_integer()}).
+-record(protocol_message_begin, {name :: string(), type :: non_neg_integer(), seqid :: non_neg_integer()}).
+
+-define(tMessageType_CALL, 1).
+-define(tMessageType_ONEWAY, 4).
+
+-spec send_function_call(#tclient{}, atom(), list()) -> {client(), ok | {error, any()}}.
+send_function_call(Client, Function, Args) ->
+    #tclient{service = Service, protocol = Proto0, seqid = SeqId} = Client,
+    Params = try Service:function_info(Function, params_type)
+             catch error:function_clause -> no_function
+             end,
+    case Params of
+        no_function ->
+            {Client, {error, {no_function, Function}}};
+        {struct, PList} when length(PList) =/= length(Args) ->
+            {Client, {error, {bad_args, Function, Args}}};
+        {struct, _PList} ->
+            % bug was here: always setting "call" type
+            MsgType = case Service:function_info(Function, reply_type) of
+                          oneway_void -> ?tMessageType_ONEWAY;
+                          _ -> ?tMessageType_CALL
+                      end,
+            Begin = #protocol_message_begin{name = atom_to_list(Function), type = MsgType, seqid = SeqId},
+            {Proto1, ok} = thrift_protocol:write(Proto0, Begin),
+            {Proto2, ok} = thrift_protocol:write(Proto1, {Params, list_to_tuple([Function | Args])}),
+            {Proto3, ok} = thrift_protocol:write(Proto2, message_end),
+            {Proto4, ok} = thrift_protocol:flush_transport(Proto3),
+            {Client#tclient{protocol = Proto4}, ok}
+    end.
