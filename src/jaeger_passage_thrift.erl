@@ -30,7 +30,7 @@ start_client(AgentHost, AgentPort, Format) ->
                                 binary ->
                                     thrift_binary_protocol:new_protocol_factory(TransportFactory, []);
                                 compact ->
-                                    % TODO implement compact format support (requires thrift library update)
+                                    % TODO implement compact format support (requires thrift library update to 0.10+)
 %%                                    thrift_compact_protocol:new_protocol_factory(TransportFactory, [])
                                     {error, {unsupported_thrift_format, Format}}
                             end,
@@ -181,7 +181,7 @@ to_i64(N) ->
 
 
 %%-------------------------------------------------------------------------------------------------------------
-%% This function has been copied to override a bug in thrift library (it is already fixed on master)
+%% This function has been copied to override a bug in thrift library (it is already fixed in 0.10)
 %%-------------------------------------------------------------------------------------------------------------
 
 -record(tclient, {service :: module(), protocol :: term(), seqid :: non_neg_integer()}).
