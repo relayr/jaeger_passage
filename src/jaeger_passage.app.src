@@ -4,7 +4,10 @@
               {registered,[]},
               {mod,{jaeger_passage_app,[]}},
               {applications,[kernel,stdlib,inets,local,passage,thrift]},
-              {env,[]},
+              {env,[
+               {tracer_state_header_name, <<"uber-trace-id">>},
+               {trace_baggage_header_prefix, <<"uberctx-">>}
+              ]},
               {modules,[]},
               {maintainers,["Takeru Ohta"]},
               {licenses,["MIT"]},

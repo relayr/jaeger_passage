@@ -130,15 +130,17 @@ inject_span_context(Context, binary, InjectFun, Carrier) ->
     InjectFun(<<"binary">>, Bin2, Carrier);
 inject_span_context(Context, Format, InjectFun, Carrier) ->
     State = passage_span_context:get_state(Context),
+    TracerStateHeaderName = get_env(tracer_state_header_name),
+    TraceBaggageHeaderPrefix = get_env(trace_baggage_header_prefix),
     MapFun =
         case Format of
             text_map ->
-                fun({K, V}) -> {?TRACE_BAGGAGE_HEADER(K), V} end;
+                fun({K, V}) -> {<<TraceBaggageHeaderPrefix/binary, K/binary>>, V} end;
             http_header ->
-                fun({K, V}) -> {?TRACE_BAGGAGE_HEADER(K), escape(V)} end
+                fun({K, V}) -> {<<TraceBaggageHeaderPrefix/binary, K/binary>>, escape(V)} end
         end,
     Items0 = lists:map(MapFun, maps:to_list(passage_span_context:get_baggage_items(Context))),
-    Items1 = [{?TRACER_STATE_HEADER_NAME, state_to_string(State)} | Items0],
+    Items1 = [{TracerStateHeaderName, state_to_string(State)} | Items0],
     lists:foldl(fun ({K, V}, Acc) -> InjectFun(K, V, Acc) end, Carrier, Items1).
 
 %% @private
@@ -185,12 +187,15 @@ extract_span_context(Format, IterateFun, Carrier) ->
                debug_id => binary(),
                binary() => binary()}.
 extract_to_map(IterateFun, Carrier0, DecodeValue, Map0) ->
+    TracerStateHeaderName = get_env(tracer_state_header_name),
+    TraceBaggageHeaderPrefix = get_env(trace_baggage_header_prefix),
+    TraceBaggageHeaderPrefixLength = byte_size(TraceBaggageHeaderPrefix),
     case IterateFun(Carrier0) of
         error                 -> Map0;
         {ok, K, V, Carrier1} ->
             Map1 =
                 case K of
-                    ?TRACER_STATE_HEADER_NAME ->
+                    TracerStateHeaderName ->
                         maps:put(state, state_from_string(DecodeValue(V)), Map0);
                     ?JAEGER_DEBUG_HEADER ->
                         maps:put(debug_id, DecodeValue(V), Map0);
@@ -204,7 +209,8 @@ extract_to_map(IterateFun, Carrier0, DecodeValue, Map0) ->
                                       fun (P) -> binary:split(P, <<"=">>) end,
                                       Pairs0)],
                         maps:merge(Map0, maps:from_list(Pairs1));
-                    ?TRACE_BAGGAGE_HEADER(Name) ->
+                    <<Prefix:TraceBaggageHeaderPrefixLength/binary, Name/binary>>
+                        when Prefix == TraceBaggageHeaderPrefix ->
                         maps:put(Name, DecodeValue(V), Map0);
                     _ -> Map0
                 end,
@@ -286,3 +292,8 @@ escape(Bin) ->
 -spec unescape(binary()) -> binary().
 unescape(Bin) ->
     list_to_binary(http_uri:decode(binary_to_list(Bin))).
+
+-spec get_env(atom()) -> any().
+get_env(Key) ->
+    {ok, Value} = application:get_env(jaeger_passage, Key),
+    Value.
