@@ -5,5 +5,3 @@
 -define(JAEGER_BAGGAGE_HEADER, <<"jaeger-baggage">>).
 -define(TRACER_HOSTNAME_TAG_KEY, 'hostname').
 -define(TRACER_IP_TAG_KEY, 'ip').
--define(TRACER_STATE_HEADER_NAME, <<"uber-trace-id">>).
--define(TRACE_BAGGAGE_HEADER(Suffix), <<"uberctx-", Suffix/binary>>).
