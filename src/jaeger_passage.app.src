@@ -9,6 +9,5 @@
                {trace_baggage_header_prefix, <<"uberctx-">>}
               ]},
               {modules,[]},
-              {maintainers,["Takeru Ohta"]},
               {licenses,["MIT"]},
-              {links,[{"GitHub","https://github.com/sile/jaeger_passage"}]}]}.
+              {links,[{"GitHub","https://github.com/relayr/jaeger_passage"}]}]}.
